@@ -521,6 +521,7 @@ export interface FilesAPI {
   rename?(oldPath: string, newPath: string): Promise<{ success: boolean; path: string }>;
   revealPath?(path: string): Promise<{ success: boolean }>;
   execCommands?(commands: string[], cwd: string): Promise<{ success: boolean; results: CommandExecResult[] }>;
+  downloadFile?(path: string): Promise<void>;
 }
 
 export interface ProjectEntry {
@@ -568,6 +569,7 @@ export interface SettingsPayload {
   showExpandedBashTools?: boolean;
   showExpandedEditTools?: boolean;
   chatRenderMode?: 'sorted' | 'live';
+  messageStreamTransport?: 'auto' | 'ws' | 'sse';
   activityRenderMode?: 'collapsed' | 'summary';
   mermaidRenderingMode?: 'svg' | 'ascii';
   fontSize?: number;

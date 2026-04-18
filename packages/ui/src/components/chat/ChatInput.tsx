@@ -1463,14 +1463,21 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                 return;
             }
             else if (commandName === 'compact' && currentSessionId) {
-                const { opencodeClient } = await import('@/lib/opencode/client');
-                const sdk = opencodeClient.getSdkClient();
-                const configState = useConfigStore.getState();
-                await sdk.session.summarize({
-                    sessionID: currentSessionId,
-                    modelID: configState.currentModelId || '',
-                    providerID: configState.currentProviderId || '',
-                });
+                try {
+                    if (!useConfigStore.getState().isConnected) {
+                        throw new Error("Connection lost. Please wait for reconnection.");
+                    }
+                    const { opencodeClient } = await import('@/lib/opencode/client');
+                    const sdk = opencodeClient.getSdkClient();
+                    const configState = useConfigStore.getState();
+                    await sdk.session.summarize({
+                        sessionID: currentSessionId,
+                        modelID: configState.currentModelId || '',
+                        providerID: configState.currentProviderId || '',
+                    });
+                } catch (error) {
+                    toast.error(error instanceof Error ? error.message : 'Failed to compact session');
+                }
                 return;
             }
         }
@@ -2880,6 +2887,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         };
     }, [fetchBranches, runtimeGit, selectedDraftProject, selectedDraftProjectBranches?.all, selectedDraftProjectPath, showDraftTargetSelectors]);
 
+    const selectedDraftProjectCurrentBranch = selectedDraftProjectBranches?.current?.trim() ?? '';
+
     const projectRootBranchOption = React.useMemo(() => {
         if (!selectedDraftProject) {
             return null;
@@ -2888,15 +2897,14 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         if (!value) {
             return null;
         }
-        const projectRootBranch = selectedDraftProjectBranches?.current?.trim() ?? '';
-        if (!projectRootBranch) {
+        if (!selectedDraftProjectCurrentBranch) {
             return null;
         }
         return {
             value,
-            label: projectRootBranch,
+            label: selectedDraftProjectCurrentBranch,
         };
-    }, [selectedDraftProject, selectedDraftProjectBranches]);
+    }, [selectedDraftProject, selectedDraftProjectCurrentBranch]);
 
     const worktreeBranchOptions = React.useMemo(() => {
         if (!selectedDraftProject) {
@@ -2914,11 +2922,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
 
         return buildSessionTargetOptions({
             projectRoot: normalizePath(selectedDraftProject.path) ?? '',
-            rootBranch: selectedDraftProjectBranches?.current?.trim() ?? '',
+            rootBranch: selectedDraftProjectCurrentBranch,
             worktrees,
             pendingBootstrapDirectory: newSessionDraft?.bootstrapPendingDirectory ?? null,
         });
-    }, [availableWorktreesByProject, newSessionDraft?.bootstrapPendingDirectory, selectedDraftProject, selectedDraftProjectBranches?.current, selectedDraftProjectPath]);
+    }, [availableWorktreesByProject, newSessionDraft?.bootstrapPendingDirectory, selectedDraftProject, selectedDraftProjectCurrentBranch, selectedDraftProjectPath]);
 
     const selectedDraftDirectory = React.useMemo(
         () => normalizePath(newSessionDraft?.bootstrapPendingDirectory ?? null)

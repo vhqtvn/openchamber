@@ -10,6 +10,7 @@ import { useInputStore } from "./input-store"
 import type { ChildStoreManager } from "./child-store"
 import { opencodeClient } from "@/lib/opencode/client"
 import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
+import { useConfigStore } from "@/stores/useConfigStore"
 import { registerSessionDirectory } from "./sync-refs"
 
 // Reference set by SyncProvider — allows actions to access SDK and stores
@@ -325,6 +326,10 @@ export async function optimisticSend(input: {
     throw new Error("Optimistic refs not set — is useSync() mounted?")
   }
 
+  if (!useConfigStore.getState().isConnected) {
+    throw new Error("Connection lost. Please wait for reconnection.")
+  }
+
   const store = dirStore()
   const messageID = ascendingId("msg")
   const textPartId = ascendingId("prt")
@@ -408,6 +413,9 @@ export async function respondToPermission(
   requestId: string,
   response: "once" | "always" | "reject",
 ): Promise<void> {
+  if (!useConfigStore.getState().isConnected) {
+    throw new Error("Connection lost. Please wait for reconnection.")
+  }
   const result = await getRequestReplyClient("permission", sessionId, requestId).permission.reply({
     requestID: requestId,
     reply: response,
@@ -421,6 +429,9 @@ export async function dismissPermission(
   sessionId: string,
   requestId: string,
 ): Promise<void> {
+  if (!useConfigStore.getState().isConnected) {
+    throw new Error("Connection lost. Please wait for reconnection.")
+  }
   const result = await getRequestReplyClient("permission", sessionId, requestId).permission.reply({
     requestID: requestId,
     reply: "reject",
@@ -439,6 +450,9 @@ export async function respondToQuestion(
   requestId: string,
   answers: string[] | string[][],
 ): Promise<void> {
+  if (!useConfigStore.getState().isConnected) {
+    throw new Error("Connection lost. Please wait for reconnection.")
+  }
   const result = await getRequestReplyClient("question", sessionId, requestId).question.reply({
     requestID: requestId,
     answers: answers as Array<Array<string>>,
@@ -452,6 +466,9 @@ export async function rejectQuestion(
   sessionId: string,
   requestId: string,
 ): Promise<void> {
+  if (!useConfigStore.getState().isConnected) {
+    throw new Error("Connection lost. Please wait for reconnection.")
+  }
   const result = await getRequestReplyClient("question", sessionId, requestId).question.reject({
     requestID: requestId,
   })

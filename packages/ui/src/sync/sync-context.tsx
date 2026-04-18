@@ -26,6 +26,7 @@ import { stripMessageDiffSnapshots, stripSessionDiffSnapshots } from "./sanitize
 import { syncDebug } from "./debug"
 import { opencodeClient } from "@/lib/opencode/client"
 import { usePermissionStore } from "@/stores/permissionStore"
+import { useConfigStore } from "@/stores/useConfigStore"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
 import type { State } from "./types"
@@ -877,6 +878,23 @@ async function resyncDirectoryAfterReconnect(
       grouped[sessionId].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     }
 
+    const permissionStore = usePermissionStore.getState()
+    const autoAcceptingSessionIds = Object.keys(grouped).filter((sessionId) => permissionStore.isSessionAutoAccepting(sessionId))
+
+    if (autoAcceptingSessionIds.length > 0) {
+      await Promise.all(
+        autoAcceptingSessionIds.flatMap((sessionId) =>
+          (grouped[sessionId] ?? []).map((permission) =>
+            sessionActions.respondToPermission(permission.sessionID, permission.id, "once").catch(() => undefined),
+          ),
+        ),
+      )
+
+      for (const sessionId of autoAcceptingSessionIds) {
+        delete grouped[sessionId]
+      }
+    }
+
     for (const [sessionId, permissions] of Object.entries(grouped)) {
       const knownIds = new Set((before.permission[sessionId] ?? []).map((item) => item.id))
       const isViewed = isViewedInCurrentSession(directory, sessionId)
@@ -1184,6 +1202,7 @@ export function SyncProvider(props: {
   directory: string
   children: React.ReactNode
 }) {
+  const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport)
   const childStoresRef = useRef<ChildStoreManager | null>(null)
   if (!childStoresRef.current) childStoresRef.current = new ChildStoreManager()
   const childStores = childStoresRef.current
@@ -1291,6 +1310,7 @@ export function SyncProvider(props: {
 
     const { cleanup } = createEventPipeline({
       sdk: props.sdk,
+      transport: messageStreamTransport,
       routeDirectory: (directory, payload) => {
         return resolveDirectoryFromRoutingIndex(routingIndex, directory, payload, childStores)
       },
@@ -1298,6 +1318,7 @@ export function SyncProvider(props: {
         handleEvent(directory, payload, childStores, routingIndex)
       },
       onReconnect: () => {
+        useConfigStore.setState({ isConnected: true })
         for (const [dir, store] of childStores.children) {
           if (reconnectResyncing.has(dir)) continue
           if (getReconnectCandidateSessionIds(store.getState()).length === 0) continue
@@ -1312,9 +1333,12 @@ export function SyncProvider(props: {
             })
         }
       },
+      onDisconnect: () => {
+        useConfigStore.setState({ isConnected: false })
+      },
     })
     return cleanup
-  }, [props.sdk, props.directory, childStores, routingIndex])
+  }, [props.sdk, childStores, routingIndex, messageStreamTransport])
 
   // Ensure current directory's child store exists
   useEffect(() => {
@@ -1678,7 +1702,7 @@ function getVisibleMessagesForSession(state: State, sessionID: string, previous?
   }
 }
 
-function buildSessionMessageRecordsSnapshot(
+export function buildSessionMessageRecordsSnapshot(
   state: State,
   sessionID: string,
   previous?: SessionMessageRecordsSnapshot,

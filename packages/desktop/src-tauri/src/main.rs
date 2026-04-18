@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use std::{
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     process::Command,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -114,6 +114,8 @@ const MENU_ITEM_NEW_WINDOW_ID: &str = "menu_new_window";
 const MENU_ITEM_SETTINGS_ID: &str = "menu_settings";
 #[cfg(target_os = "macos")]
 const MENU_ITEM_COMMAND_PALETTE_ID: &str = "menu_command_palette";
+#[cfg(target_os = "macos")]
+const MENU_ITEM_QUICK_OPEN_ID: &str = "menu_quick_open";
 #[cfg(target_os = "macos")]
 const MENU_ITEM_NEW_SESSION_ID: &str = "menu_new_session";
 #[cfg(target_os = "macos")]
@@ -395,6 +397,14 @@ fn build_macos_menu<R: tauri::Runtime>(
         Some("Cmd+K"),
     )?;
 
+    let quick_open = MenuItem::with_id(
+        app,
+        MENU_ITEM_QUICK_OPEN_ID,
+        "Quick Open…",
+        true,
+        Some("Cmd+P"),
+    )?;
+
     let new_window = MenuItem::with_id(
         app,
         MENU_ITEM_NEW_WINDOW_ID,
@@ -582,6 +592,7 @@ fn build_macos_menu<R: tauri::Runtime>(
                     &PredefinedMenuItem::separator(app)?,
                     &settings,
                     &command_palette,
+                    &quick_open,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::services(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
@@ -1619,13 +1630,14 @@ fn settings_file_path() -> PathBuf {
         .join("settings.json")
 }
 
+fn read_desktop_settings_json() -> Option<serde_json::Value> {
+    fs::read_to_string(settings_file_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+}
+
 fn read_desktop_local_port_from_disk() -> Option<u16> {
-    let path = settings_file_path();
-    let raw = fs::read_to_string(path).ok();
-    let parsed = raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    parsed
+    read_desktop_settings_json()
         .as_ref()
         .and_then(|v| v.get("desktopLocalPort"))
         .and_then(|v| v.as_u64())
@@ -2537,27 +2549,10 @@ async fn spawn_local_server(app: &tauri::AppHandle) -> Result<String> {
         }
     });
 
+    let desktop_settings = read_desktop_settings_json();
+
     let opencode_binary_from_settings: Option<String> = (|| {
-        let data_dir = env::var("OPENCHAMBER_DATA_DIR")
-            .ok()
-            .and_then(|v| {
-                let t = v.trim().to_string();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(PathBuf::from(t))
-                }
-            })
-            .or_else(|| {
-                resolved_home_dir_path
-                    .as_ref()
-                    .map(|home| home.join(".config").join("openchamber"))
-            });
-        let data_dir = data_dir?;
-        let settings_path = data_dir.join("settings.json");
-        let raw = fs::read_to_string(&settings_path).ok()?;
-        let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-        let value = json.get("opencodeBinary")?.as_str()?.trim();
+        let value = desktop_settings.as_ref()?.get("opencodeBinary")?.as_str()?.trim();
         if value.is_empty() {
             return None;
         }
@@ -2580,6 +2575,13 @@ async fn spawn_local_server(app: &tauri::AppHandle) -> Result<String> {
 
         Some(candidate)
     })();
+
+    let sidecar_bind_host = desktop_settings
+        .as_ref()
+        .and_then(|value| value.get("desktopLanAccessEnabled"))
+        .and_then(|value| value.as_bool())
+        .map(|enabled| if enabled { "0.0.0.0" } else { "127.0.0.1" })
+        .unwrap_or("127.0.0.1");
 
     let mut push_unique = |value: String| {
         let trimmed = value.trim();
@@ -2657,7 +2659,7 @@ async fn spawn_local_server(app: &tauri::AppHandle) -> Result<String> {
             .sidecar(SIDECAR_NAME)
             .map_err(|err| anyhow!("Failed to resolve sidecar '{SIDECAR_NAME}': {err}"))?
             .args(["--port", &port.to_string()])
-            .env("OPENCHAMBER_HOST", "127.0.0.1")
+            .env("OPENCHAMBER_HOST", sidecar_bind_host)
             .env("OPENCHAMBER_DIST_DIR", dist_dir.clone())
             .env("OPENCHAMBER_RUNTIME", "desktop")
             .env("OPENCHAMBER_DESKTOP_NOTIFY", "true")
@@ -3061,6 +3063,45 @@ fn desktop_read_file(path: String) -> Result<FileContent, String> {
     })
 }
 
+#[tauri::command]
+async fn desktop_save_markdown_file(
+    app: tauri::AppHandle,
+    default_file_name: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let trimmed_file_name = default_file_name.trim();
+    if trimmed_file_name.is_empty() {
+        return Err("Default file name is required".to_string());
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(trimmed_file_name)
+        .save_file(move |file_path| {
+            let _ = tx.send(file_path);
+        });
+
+    let Some(file_path) = rx
+        .await
+        .map_err(|_| "Save dialog was closed unexpectedly".to_string())?
+    else {
+        return Ok(None);
+    };
+
+    let path = file_path
+        .into_path()
+        .map_err(|_| "Selected export path is not a local filesystem path".to_string())?;
+
+    std::fs::write(&path, content)
+        .map_err(|error| format!("Failed to save exported session: {error}"))?;
+
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
 #[derive(Serialize)]
 struct FileContent {
     mime: String,
@@ -3156,9 +3197,7 @@ fn parse_theme_override(theme_mode: Option<&str>, theme_variant: Option<&str>) -
 }
 
 fn read_desktop_theme_override() -> Option<tauri::Theme> {
-    let settings = fs::read_to_string(settings_file_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let settings = read_desktop_settings_json();
 
     let use_system_theme = settings
         .as_ref()
@@ -3180,6 +3219,22 @@ fn read_desktop_theme_override() -> Option<tauri::Theme> {
         .and_then(|value| value.as_str());
 
     parse_theme_override(theme_mode, theme_variant)
+}
+
+fn detect_desktop_lan_ipv4() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let address = socket.local_addr().ok()?;
+    let ip = address.ip();
+
+    if ip.is_loopback() {
+        return None;
+    }
+
+    match ip {
+        std::net::IpAddr::V4(ipv4) => Some(ipv4.to_string()),
+        std::net::IpAddr::V6(_) => None,
+    }
 }
 
 /// Apply platform-specific window builder configuration.
@@ -3216,6 +3271,11 @@ fn desktop_set_window_theme(
         .map_err(|error| format!("failed to set window theme: {error}"))?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn desktop_get_lan_address() -> Option<String> {
+    detect_desktop_lan_ipv4()
 }
 
 fn is_window_state_visible(app: &tauri::AppHandle, state: &DesktopWindowState) -> bool {
@@ -3825,6 +3885,10 @@ fn main() {
                     dispatch_menu_action(app, "command-palette");
                     return;
                 }
+                if id == MENU_ITEM_QUICK_OPEN_ID {
+                    dispatch_menu_action(app, "quick-open");
+                    return;
+                }
 
                 if id == MENU_ITEM_NEW_SESSION_ID {
                     dispatch_menu_action(app, "new-session");
@@ -3960,10 +4024,12 @@ fn main() {
             desktop_filter_installed_apps,
             desktop_get_installed_apps,
             desktop_fetch_app_icons,
+            desktop_save_markdown_file,
             desktop_hosts_get,
             desktop_hosts_set,
             desktop_host_probe,
             desktop_set_window_theme,
+            desktop_get_lan_address,
             remote_ssh::desktop_ssh_instances_get,
             remote_ssh::desktop_ssh_instances_set,
             remote_ssh::desktop_ssh_import_hosts,
